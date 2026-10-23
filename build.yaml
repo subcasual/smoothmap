@@ -1,0 +1,75 @@
+# Settings for tools/build_mod.py, which builds the installable mod (and its zip):
+#
+#   python tools/build_mod.py                    # build everything
+#   python tools/build_mod.py --target release   # just the mod
+#   python tools/build_mod.py --dry-run          # patch only, and show the wcc_lite commands
+#
+# Relative paths are relative to this file.
+
+# Your REDkit install.
+redkit:
+  bin: C:\Program Files (x86)\Steam\steamapps\common\The Witcher 3 REDkit\bin\x64_RedKit    # where wcc_lite.exe is
+  depot: C:\Program Files (x86)\Steam\steamapps\common\The Witcher 3 REDkit\r4data        # REDkit's depot (build it in REDkit first)
+
+# What gets built. `vanilla` is the depot's copy of the map file; an input can also be a path to a
+# .redswf, a mod folder or a .bundle.
+targets:
+  release:
+    input: vanilla
+    patches: [patches/smoothmap.yaml]
+    set: {}                                       # parameter overrides, e.g. { fade: 0.3 }
+    mod_folder: modSmoothMap                      # installed as <game>\mods\modSmoothMap
+    zip: modSmoothMap.zip
+
+# Compatibility versions: one for each mod in `mods` that has its own map file, built from that file.
+# A patch that doesn't fit it is left out, and the build says so. {name} is the other mod's name.
+compat:
+  mods: mods
+  patches: [patches/smoothmap.yaml]
+  set: {}
+  skip_failing: true
+  mod_folder: mod000SmoothMap_{name}              # mod000... loads before the other mod
+  zip: mod000SmoothMap_{name}.zip
+  info_json:                                      # changes to info_json below; also {mod}, {mod_version}
+    name: smoothmap_{name}
+    modName: Smooth Map for {mod}
+    description: Smooth Map, compatibility version for {mod} {mod_version}
+
+# The mod's content\info.json. `version` can also be set with --version.
+info_json:
+  name: smoothmap
+  modName: Smooth Map
+  version: "1.0"
+  gameVersion: "29"
+  description: Smooth Map
+  author: ""
+  idSpace: 10000000
+  workshopId: 0
+  succesfullyCooked: true
+  dependencies: []
+  useLooseScripts: false
+
+# Where the build works, and where finished mods go.
+work: build/package
+dist: dist
+# After each build, the decompiled ActionScript diff of the mod against its input goes here, for
+# review (needs FFDec; skipped without it). It contains CDPR's code: keep it out of public repos.
+as3diff: changes
+
+# ---------------------------------------------------------------------------------------------------
+# Advanced: you shouldn't need to change these. docs/NOTES.md ("Toolchain") explains the details.
+
+# The file the patches change, by its path in the game's depot.
+resource: gameplay\gui_new\swf\worldmap\panel_worldmap.redswf
+
+# Reading files out of mods' bundles: builtin (fast) or wcc_lite (slow; uses `unbundle` below).
+unbundler: builtin
+# LZ4 decompression for the builtin reader: python-lz4 (pip install lz4) or builtin (no dependency, slower).
+lz4: python-lz4
+
+# How wcc_lite is run. The exact form matters: e.g. -workspaceDir and its folder are two arguments.
+commands:
+  cook:          ["{wcc}", "cook", "-platform=pc", "-mod={workspace}", "-workspaceDir", "{project}\\", "-outdir={cooked}"]
+  pack:          ["{wcc}", "pack", "-dir={cooked}", "-outdir={content}"]
+  metadatastore: ["{wcc}", "metadatastore", "-path={content}"]
+  unbundle:      ["{wcc}", "unbundle", "-dir={bundles}", "-outdir={unbundled}"]

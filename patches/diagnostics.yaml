@@ -1,0 +1,295 @@
+# Diagnostics overlay for Smooth Map (testing only, never for release).
+# Apply after smoothmap.yaml:
+#   python -m redswf_patch apply -p patches/smoothmap.yaml -p patches/diagnostics.yaml in.redswf out.redswf
+#   ... --set slowmo=true      (map fade stretched to 3 s, to see the order of events by eye)
+#
+# Prints a timeline (yellow on black, the game's $NormalFont) each time the map opens:
+#   open / controller change / pins done (N pins, T ticks) / crosshair at reveal / fade-in starts /
+#   first input reaches map / input accepted / fade done / slide done
+# Times are milliseconds since loading starts (HubMap.StartInitialTimer).
+
+format: 1
+target:
+  resource: gameplay\gui_new\swf\worldmap\panel_worldmap.redswf
+  game: The Witcher 3 Remastered 5.01
+
+parameters:
+  slowmo:      { default: false, doc: "Stretch the map fade to slowmo_fade seconds" }
+  slowmo_fade: { default: 3.0,   doc: "Map fade duration in slow motion, s" }
+
+snippets:
+  # if (_smDbg) _smDbg.appendText("\n  <text> +" + (getTimer() - _smT0) + " ms");
+  log:
+    params: [text]
+    code: |
+      getlocal0
+      getproperty     HubMap._smDbg
+      iffalse         skip
+      getlocal0
+      getproperty     HubMap._smDbg
+      pushstring      "\n  {{text}} +"
+      findpropstrict  flash.utils::getTimer
+      callproperty    flash.utils::getTimer, 0
+      getlocal0
+      getproperty     HubMap._smT0
+      subtract
+      add
+      pushstring      " ms"
+      add
+      callpropvoid    appendText, 1
+      skip:
+
+patches:
+
+  - id: diag-overlay
+    title: "Diagnostics: on-screen timeline of map opening"
+    why: |
+      Measures the opening on the user's machine: pin building, the reveal, when input arrives and
+      is accepted, controller detection, fade and slide completion. A plain TextField renders every
+      character as a box (the game has no system fonts), so it uses Scaleform's mapped $NormalFont
+      with embedFonts, like the menus' own text.
+    ops:
+      - add_field: { class: HubMap, name: _smDbg, type: flash.text::TextField, visibility: private }
+      - add_field: { class: HubMap, name: _smT0, type: int, visibility: private }
+      - add_field: { class: HubMap, name: _smTicks, type: int, visibility: private }
+      - add_field: { class: HubMap, name: _smInput, type: int, visibility: private }
+
+      # Loading starts: reset the clock and counters, create the overlay once, print "open".
+      - edit:
+          method: HubMap.StartInitialTimer
+          steps:
+            - insert: { at: method-start }
+              code: |
+                getlocal0
+                findpropstrict  flash.utils::getTimer
+                callproperty    flash.utils::getTimer, 0
+                convert_i
+                setproperty     HubMap._smT0
+                getlocal0
+                pushbyte        0
+                setproperty     HubMap._smTicks
+                getlocal0
+                pushbyte        0
+                setproperty     HubMap._smInput
+                getlocal0
+                getproperty     HubMap._smDbg
+                iftrue          have
+                getlocal0
+                findpropstrict  flash.text::TextField
+                constructprop   flash.text::TextField, 0
+                setproperty     HubMap._smDbg
+                getlocal0
+                getproperty     HubMap._smDbg
+                push            16776960
+                setproperty     textColor
+                getlocal0
+                getproperty     HubMap._smDbg
+                push            1000
+                setproperty     width
+                getlocal0
+                getproperty     HubMap._smDbg
+                push            230
+                setproperty     height
+                getlocal0
+                getproperty     HubMap._smDbg
+                pushfalse
+                setproperty     mouseEnabled
+                getlocal0
+                getproperty     HubMap._smDbg
+                pushfalse
+                setproperty     selectable
+                getlocal0
+                getproperty     HubMap._smDbg
+                findpropstrict  flash.text::TextFormat
+                pushstring      "$NormalFont"
+                pushbyte        22
+                push            16776960
+                constructprop   flash.text::TextFormat, 3
+                setproperty     defaultTextFormat
+                getlocal0
+                getproperty     HubMap._smDbg
+                pushtrue
+                setproperty     embedFonts
+                getlocal0
+                getproperty     HubMap._smDbg
+                pushtrue
+                setproperty     background
+                getlocal0
+                getproperty     HubMap._smDbg
+                pushbyte        0
+                setproperty     backgroundColor
+                getlocal0
+                getlocal0
+                getproperty     HubMap._smDbg
+                callpropvoid    addChild, 1
+                have:
+                getlocal0
+                getproperty     HubMap._smDbg
+                pushstring      "open"
+                setproperty     text
+
+      # Every pin-building tick: count it. When pins are done: time, pin count, ticks.
+      - edit:
+          method: HubMap.handleInitialTimer
+          steps:
+            - insert: { at: method-start }
+              code: |
+                getlocal0
+                getlocal0
+                getproperty     HubMap._smTicks
+                increment_i
+                setproperty     HubMap._smTicks
+            - insert:
+                after: |
+                  getlocal0
+                  callpropvoid  finalizeMapPinsProcessing
+              code:
+                - snippet: log
+                  args: { text: pins done }
+                - |
+                  getlocal0
+                  getproperty     HubMap._smDbg
+                  iffalse         no_overlay
+                  getlocal0
+                  getproperty     HubMap._smDbg
+                  pushstring      " ("
+                  getlocal0
+                  getproperty     HubMap._mapPinDataArray
+                  getproperty     length
+                  add
+                  pushstring      " pins, "
+                  add
+                  getlocal0
+                  getproperty     HubMap._smTicks
+                  add
+                  pushstring      " ticks)"
+                  add
+                  callpropvoid    appendText, 1
+                  no_overlay:
+
+      # The reveal: fade-in starts, and whether the crosshair is visible at that moment.
+      - edit:
+          method: HubMap.handleShowTimer
+          steps:
+            - insert:
+                after: |
+                  getlocal0
+                  callpropvoid  StopShowTimer
+              code:
+                - snippet: log
+                  args: { text: crosshair at reveal }
+                - |
+                  getlocal0
+                  getproperty     HubMap._smDbg
+                  iffalse         no_overlay
+                  getlocal0
+                  getproperty     HubMap._smDbg
+                  pushstring      " (visible: "
+                  getlocal0
+                  getproperty     mcHubMapCrosshair
+                  getproperty     visible
+                  add
+                  pushstring      ")"
+                  add
+                  callpropvoid    appendText, 1
+                  no_overlay:
+                - snippet: log
+                  args: { text: fade-in starts }
+
+      # Input: when the first event reaches the map, whether it's accepted then, and when the
+      # map first accepts one ("blocked upstream" vs "the map's own gate refuses it").
+      - edit:
+          method: HubMap.handleInput
+          steps:
+            - insert: { at: method-start }
+              code:
+                - |
+                  getlocal0
+                  getproperty     HubMap._smInput
+                  pushbyte        0
+                  ifne            not_first
+                - snippet: log
+                  args: { text: first input reaches map }
+                - |
+                  getlocal0
+                  getproperty     HubMap._smDbg
+                  iffalse         no_overlay
+                  getlocal0
+                  getproperty     HubMap._smDbg
+                  pushstring      " (map accepts input: "
+                  getlocal0
+                  callproperty    CanProcessInput, 0
+                  add
+                  pushstring      ")"
+                  add
+                  callpropvoid    appendText, 1
+                  no_overlay:
+                  getlocal0
+                  pushbyte        1
+                  setproperty     HubMap._smInput
+                  not_first:
+                  getlocal0
+                  getproperty     HubMap._smInput
+                  pushbyte        1
+                  ifne            input_done
+                  getlocal0
+                  callproperty    CanProcessInput, 0
+                  iffalse         input_done
+                - snippet: log
+                  args: { text: input accepted }
+                - |
+                  getlocal0
+                  pushbyte        2
+                  setproperty     HubMap._smInput
+                  input_done:
+
+      # Controller changes reaching the map (the crosshair shows unless isMouse).
+      - edit:
+          method: HubMap.OnControllerChanged
+          steps:
+            - insert: { at: method-start }
+              code:
+                - snippet: log
+                  args: { text: controller change }
+                - |
+                  getlocal0
+                  getproperty     HubMap._smDbg
+                  iffalse         no_overlay
+                  getlocal0
+                  getproperty     HubMap._smDbg
+                  pushstring      " (gamepad: "
+                  getlocal1
+                  add
+                  pushstring      ", mouse: "
+                  add
+                  getlocal2
+                  add
+                  pushstring      ")"
+                  add
+                  callpropvoid    appendText, 1
+                  no_overlay:
+
+      # Fade-in finished (side panels enabled) and slide-in finished.
+      - edit:
+          method: HubMap.handleFadingInEnded
+          steps:
+            - insert: { at: method-start }
+              code: [ { snippet: log, args: { text: fade done } } ]
+      - edit:
+          method: HubMap.SetMenuAnimCompleted
+          steps:
+            - insert: { at: method-start }
+              code: [ { snippet: log, args: { text: slide done } } ]
+
+  - id: diag-slow-motion
+    title: "Diagnostics: slow-motion map fade"
+    when: slowmo
+    as3: |
+      FADING_GRADIENT_DURATION = 3.0;     // HubMap; Smooth Map's value otherwise
+      FADING_TEXTURES_DURATION = 3.0;
+    ops:
+      - set_constants:
+          class: HubMap
+          values:
+            FADING_GRADIENT_DURATION: { expect: "{{fade}}", value: "{{slowmo_fade}}" }
+            FADING_TEXTURES_DURATION: { expect: "{{fade}}", value: "{{slowmo_fade}}" }

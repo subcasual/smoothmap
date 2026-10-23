@@ -1,0 +1,20 @@
+# Game files (CDPR assets): never commit
+build/*
+*.redswf
+*.swf
+*.gfx
+*.bundle
+metadata.store
+__pycache__/
+*.pyc
+.venv/
+
+# other authors' mods, input for compatibility variants (build.yaml compat.mods)
+mods/
+
+# build outputs
+dist/
+build/package/
+
+# ActionScript diffs of each build (contain decompiled CDPR code): a separate private repo lives in changes/
+changes/

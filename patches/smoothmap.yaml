@@ -1,0 +1,789 @@
+# Smooth Map: provided as a patch set for redswf_patch (format: swf_patch/patch-format.md).
+#
+# To apply:
+#   python -m redswf_patch apply -p patches/smoothmap.yaml "<depot>\gameplay\gui_new\swf\worldmap\panel_worldmap.redswf" out.redswf
+#   (<depot>: REDkit's r4data folder, build.yaml's redkit.depot)
+#
+# Notes:
+#   Patch order matters for byte-identical output (see "Order and determinism" in the spec): reorder
+#   only deliberately, and expect the release hash in tests/test_redswf_patch.py to change.
+
+format: 1
+target:
+  resource: gameplay\gui_new\swf\worldmap\panel_worldmap.redswf
+  game: The Witcher 3 Remastered 5.01
+
+parameters:
+  dt_clamp_ms:   { default: 100,   doc: "After a hitch, never move more than this many ms worth in one update" }
+  show_interval: { default: 1,     doc: "Pause between pins finishing and the fade-in, ms (vanilla 200)" }
+  fade:          { default: 0.2,   doc: "Fade-in of the map layer, s (vanilla 0.33 gradient/pins, 0.66 textures)" }
+  pin_timer_ms:  { default: 1,     doc: "Pin-building timer, ms (vanilla 20); 1 = every frame" }
+  pin_budget_ms: { default: 8,     doc: "Per frame, build pins until this much time is used (at least one pin)" }
+  pins_cap:      { default: 30000, doc: "Pins per tick cap (vanilla 30); effectively unlimited, the budget decides" }
+  slide:         { default: true,  doc: "Keep the menu's slide-in" }
+  shell_show:    { default: 0.001, doc: "Menu show duration without the slide, s; above 0 so callbacks run in vanilla order" }
+
+profiles:
+  release: {}
+
+snippets:
+  # Start of a per-frame handler: real elapsed time as a speed multiplier in local `dt`.
+  #   var now = getTimer(); var dt = now - <last>; if (dt < 1) return; <last> = now;
+  #   if (dt > clamp) dt = clamp; dt /= <cal>;
+  measure_dt:
+    params: [last, cal]
+    code: |
+      findpropstrict  flash.utils::getTimer
+      callproperty    flash.utils::getTimer, 0
+      convert_i
+      setlocal        now
+      getlocal        now
+      getlocal0
+      getproperty     {{last}}
+      subtract
+      convert_d
+      setlocal        dt
+      getlocal        dt
+      pushbyte        1
+      ifnlt           dt_ok
+      returnvoid
+      dt_ok:
+      getlocal0
+      getlocal        now
+      setproperty     {{last}}
+      getlocal        dt
+      push            {{dt_clamp_ms}}
+      ifngt           dt_no_clamp
+      push            {{dt_clamp_ms}}
+      convert_d
+      setlocal        dt
+      dt_no_clamp:
+      getlocal        dt
+      push            {{cal}}
+      divide
+      setlocal        dt
+
+  scale_by_dt:
+    code: |
+      getlocal        dt
+      multiply
+
+  # GTweener.to(this.<member>, <duration>, {alpha: 1}, {ease: Sine.easeIn}) -- the map's own fade style.
+  fade_in:
+    params: [member, duration]
+    code: |
+      getlex          com.gskinner.motion::GTweener
+      getlocal0
+      getproperty     {{member}}
+      push            {{duration}}
+      pushstring      "alpha"
+      pushbyte        1
+      newobject       1
+      pushstring      "ease"
+      getlex          com.gskinner.motion.easing::Sine
+      getproperty     easeIn
+      newobject       1
+      callpropvoid    to, 4
+
+patches:
+
+  # ---------------------------------------------------------------------------------------------
+  - id: smooth-tweens
+    title: Map animations update every frame instead of 24 times a second
+    why: |
+      Affects smoothness of tween-based animations such as the slide and fade.
+      GTween computes values from real elapsed time but is only ticked on ENTER_FRAME, i.e. at the
+      SWF's 24 fps. A second ticker on a 1 ms Timer (serviced once per engine frame) updates every
+      frame. Harmless only because every tween here is time-based: a tween with useFrames would
+      advance per tick and run faster, so such files are refused.
+    as3: |
+      // GTween.staticInit(), after the vanilla ENTER_FRAME listener:
+      _smTicker = new Timer(1);
+      _smTicker.addEventListener(TimerEvent.TIMER, staticTick);
+      _smTicker.start();
+    ops:
+      - guard:
+          forbid:
+            - pattern: pushstring "useFrames"
+            - pattern: "getproperty|setproperty|initproperty useFrames"
+          outside: GTween
+          message: A tween outside GTween uses useFrames; the per-frame ticker would make it run faster.
+      - add_field: { class: GTween, name: _smTicker, type: flash.utils::Timer, visibility: protected, static: true }
+      - edit:
+          method: GTween.staticInit
+          steps:
+            - insert:
+                after: |
+                  getlex        Event
+                  getproperty   ENTER_FRAME
+                  getlex        $tick:staticTick
+                  callpropvoid  $listen:addEventListener
+              code: |
+                findproperty    GTween._smTicker
+                findpropstrict  flash.utils::Timer
+                pushbyte        1
+                constructprop   flash.utils::Timer, 1
+                setproperty     GTween._smTicker
+                getlex          GTween._smTicker
+                getlex          flash.events::TimerEvent
+                getproperty     TIMER
+                getlex          $tick
+                callpropvoid    $listen, 2
+                getlex          GTween._smTicker
+                callpropvoid    start, 0
+
+  # ---------------------------------------------------------------------------------------------
+  - id: world-map-panning
+    title: World map panning is framerate independent
+    why: |
+      Vanilla moves the world map a fixed step per 24 ms timer tick. The timer now fires every
+      frame and the step is scaled by the real elapsed time, so speed matches vanilla at any frame
+      rate while moving on every frame.
+    as3: |
+      scrollTimer = new Timer(1);                       // configUI; was new Timer(24)
+      // handleScrollTimer: <measure_dt, 24 ms>, then
+      ScrollMap(_bufScrollX * dt, _bufScrollY * dt);    // gamepad
+      ScrollMap(x * dt, y * dt);                        // keyboard
+    ops:
+      - add_field: { class: UniverseMap, name: _smLastScrollTime, type: int, visibility: private }
+      - edit:
+          method: UniverseMap.configUI
+          steps:
+            - replace:
+                after: |
+                  findpropstrict  Timer
+                match: |
+                  pushbyte        24
+                before: |
+                  constructprop   Timer
+                  initproperty|setproperty  scrollTimer
+              with: push 1
+      - edit:
+          method: UniverseMap.handleScrollTimer
+          locals: [dt, now]
+          steps:
+            - insert: { at: method-start }
+              code:
+                - snippet: measure_dt
+                  args: { last: UniverseMap._smLastScrollTime, cal: 24 }
+            - insert:
+                after: |
+                  getproperty   _bufScrollX
+                before: |
+                  getlocal0
+                  getproperty   _bufScrollY
+                  callpropvoid  ScrollMap
+              code: [ { snippet: scale_by_dt } ]
+            - insert:
+                after: |
+                  getproperty   _bufScrollX
+                  getlocal0
+                  getproperty   _bufScrollY
+                before: |
+                  callpropvoid  ScrollMap
+              code: [ { snippet: scale_by_dt } ]
+            - insert:
+                after: |
+                  getlocal3
+                before: |
+                  getlocal2
+                  callpropvoid  ScrollMap
+              code: [ { snippet: scale_by_dt } ]
+            - insert:
+                after: |
+                  getlocal3
+                  getlocal2
+                before: |
+                  callpropvoid  ScrollMap
+              code: [ { snippet: scale_by_dt } ]
+
+  # ---------------------------------------------------------------------------------------------
+  - id: regional-map-panning-and-zoom
+    title: Regional map panning and stick/keyboard zoom are framerate independent
+    why: |
+      Same as the world map, at the regional map's 17 ms interval. Zoom is multiplicative (each
+      step multiplies the scale by 1.03, 1.1 with a mouse), so per frame it uses step^(dt/17):
+      compounded over a second that's vanilla's zoom speed. The exponent lives in a field that is
+      dt inside the handler and 1 everywhere else, so the mouse wheel keeps one step per notch.
+    as3: |
+      _scrollAndZoomTimer = new Timer(1);               // constructor; was new Timer(17)
+      _smZoomScale = 1;                                 // constructor
+      // handleScrollAndZoomTimer: <measure_dt, 17 ms>, _smZoomScale = dt, scroll * dt,
+      // and _smZoomScale = 1 before every return.
+      return ZoomByFactor(Math.pow(factor, _smZoomScale));   // Zoom()
+    ops:
+      - add_field: { class: HubMap, name: _smLastScrollTime, type: int, visibility: private }
+      - add_field: { class: HubMap, name: _smZoomScale, type: Number, visibility: private }
+      - edit:
+          method: HubMap.<constructor>
+          steps:
+            - replace:
+                after: |
+                  findpropstrict  Timer
+                match: |
+                  pushbyte        17
+                before: |
+                  constructprop   Timer
+                  initproperty|setproperty  _scrollAndZoomTimer
+              with: push 1
+            - insert: { at: method-start }
+              code: |
+                getlocal0
+                pushbyte        1
+                setproperty     HubMap._smZoomScale
+      - edit:
+          method: HubMap.handleScrollAndZoomTimer
+          locals: [dt, now]
+          steps:
+            - insert: { at: method-start }
+              code:
+                - snippet: measure_dt
+                  args: { last: HubMap._smLastScrollTime, cal: 17 }
+                - |
+                  getlocal0
+                  getlocal        dt
+                  setproperty     HubMap._smZoomScale
+            - insert: { at: before-each-return }
+              code: |
+                getlocal0
+                pushbyte        1
+                setproperty     HubMap._smZoomScale
+            - insert:
+                after: |
+                  getproperty   _gamepadScrollX
+                  pushdouble    *
+                  multiply
+              code: [ { snippet: scale_by_dt } ]
+            - insert:
+                after: |
+                  getproperty   _gamepadScrollY
+                  pushdouble    *
+                  multiply
+              code: [ { snippet: scale_by_dt } ]
+            - insert:
+                after: |
+                  getlocal3
+                before: |
+                  getlocal2
+                  callproperty  scrollMap
+              code: [ { snippet: scale_by_dt } ]
+            - insert:
+                after: |
+                  getlocal3
+                  getlocal2
+                before: |
+                  callproperty  scrollMap
+              code: [ { snippet: scale_by_dt } ]
+      - edit:
+          method: HubMap.Zoom
+          steps:
+            - insert:
+                after: |
+                  getlocal0
+                before: |
+                  *
+                  callproperty  ZoomByFactor
+              code: getlex Math
+            - insert:
+                after: |
+                  getlocal0
+                  *
+                before: |
+                  callproperty  ZoomByFactor
+              code: |
+                getlocal0
+                getproperty     HubMap._smZoomScale
+                callproperty    pow, 2
+
+  # ---------------------------------------------------------------------------------------------
+  - id: configure-slide
+    title: The map menu's slide-in can be turned off
+    when: not slide
+    why: |
+      With `slide: false`, the menu shell (black backing, frame, buttons) appears at once; only the
+      map layer fades in, once it's loaded. Duration stays slightly above 0: GTween completes a
+      zero-length tween synchronously inside GTweener.to(), which would run the show-complete
+      callbacks during menu setup. This CoreMenu is the map file's own copy, so other menus keep
+      their slide.
+    as3: |
+      // CoreMenu, only with slide: false
+      SHOW_ANIM_OFFSET = 0;                // was 500: no slide
+      SHOW_ANIM_DURATION = 0.001;          // shell_show; was 0.8
+    ops:
+      - set_constants:
+          class: CoreMenu
+          values:
+            SHOW_ANIM_DURATION: { expect: 0.8, value: "{{shell_show}}" }
+            SHOW_ANIM_OFFSET:   { expect: 500, value: 0 }
+
+  # ---------------------------------------------------------------------------------------------
+  - id: reveal-timing
+    title: Shorter pause and fade before the map appears
+    as3: |
+      SHOW_INTERVAL = 1;                        // was 200
+      FADING_GRADIENT_DURATION = 0.2;           // was 0.33
+      FADING_TEXTURES_DURATION = 0.2;           // was 0.66
+    ops:
+      - set_constants:
+          class: HubMap
+          values:
+            SHOW_INTERVAL:            { expect: 200,  value: "{{show_interval}}" }
+            FADING_GRADIENT_DURATION: { expect: 0.33, value: "{{fade}}" }
+            FADING_TEXTURES_DURATION: { expect: 0.66, value: "{{fade}}" }
+
+  # ---------------------------------------------------------------------------------------------
+  - id: pins-during-slide
+    title: Pin building doesn't wait for the slide-in to finish
+    as3: |
+      // handleInitialTimer: the `if (_menuAnimCompleted)` wrapper is removed; the flag itself
+      // is untouched (other code still reads it).
+    ops:
+      - edit:
+          method: HubMap.handleInitialTimer
+          steps:
+            - replace:
+                match: |
+                  getlocal0
+                  getproperty   _menuAnimCompleted
+                  iffalse
+              with: ""
+
+  # ---------------------------------------------------------------------------------------------
+  - id: pin-timer
+    title: Pins are built on every frame
+    as3: |
+      _initialTimer = new Timer(1);             // StartInitialTimer; was new Timer(20)
+    ops:
+      - edit:
+          method: HubMap.StartInitialTimer
+          steps:
+            - replace:
+                after: |
+                  findpropstrict  Timer
+                match: |
+                  pushbyte        20
+                before: |
+                  constructprop   Timer
+                  initproperty|setproperty  _initialTimer
+              with: push {{pin_timer_ms}}
+
+  # ---------------------------------------------------------------------------------------------
+  - id: pin-time-budget
+    title: Each frame builds pins until the time budget is used (at least one pin)
+    why: |
+      A fixed batch is wrong for someone: too slow on a fast PC, a hitch on a slow one. The budget
+      adapts; unfinished work continues next frame. updatePins (pins changing while the map is open)
+      still builds every pin at once: it calls processMapPins(true) and finalizes right after, so
+      that call is exempt. Measured: ~0.25 ms per pin. Vanilla's cap of 30 pins per tick is lifted here, with the budget
+      that replaces it: without the budget, the raised cap would build every pin in one frame.
+    as3: |
+      MAX_PROCESSED_PIN_COUNT = 30000;                                  // was 30
+      var budgetStart:int = getTimer();                                 // processMapPins, first line
+      while (...) {
+          ...vanilla: build one pin...
+          if (!forceAll && getTimer() - budgetStart >= 8) break;        // before the loop test
+      }
+    ops:
+      - set_constants:
+          class: HubMap
+          values:
+            MAX_PROCESSED_PIN_COUNT:  { expect: 30,   value: "{{pins_cap}}" }
+      - edit:
+          method: HubMap.processMapPins
+          locals: [budgetStart]
+          steps:
+            - insert: { at: method-start }
+              code: |
+                findpropstrict  flash.utils::getTimer
+                callproperty    flash.utils::getTimer, 0
+                convert_i
+                setlocal        budgetStart
+            - insert:
+                before: |                 # at the end of the loop body: before the loop test's jump target
+                  <jump-target>
+                  getlocal *
+                  getlocal *
+                  iflt
+              code: |
+                getlocal1
+                iftrue          keep_going
+                findpropstrict  flash.utils::getTimer
+                callproperty    flash.utils::getTimer, 0
+                getlocal        budgetStart
+                subtract
+                push            {{pin_budget_ms}}
+                ifnge           keep_going
+                jump            budget_exit
+                keep_going:
+            - insert:
+                after: |                  # right after the loop exits
+                  getlocal *
+                  getlocal *
+                  iflt
+              code: |
+                budget_exit:
+
+  # ---------------------------------------------------------------------------------------------
+  - id: edge-arrows
+    title: Edge arrows appear already aimed, fading in with the map
+    why: |
+      The arrows to off-screen quests are re-aimed every frame from the map's position, but the map
+      is only centered after the last pin is built, so during loading they aimed from the wrong
+      place and snapped. They're held invisible while loading and released at the reveal, where
+      their canvas fades in with the map. The canvas is private to PinPointersManager, so the map
+      only raises flags and the manager acts on them.
+    as3: |
+      public var smHold:Boolean; public var smFadeIn:Boolean;         // PinPointersManager
+      // updatePointersPosition(), first lines:
+      if (smFadeIn) { smFadeIn = false; _canvas.alpha = 0; GTweener.to(_canvas, 0.2, {alpha: 1}, {ease: Sine.easeIn}); }
+      if (smHold) return;
+      PinPointersManager.getInstance().smHold = true;                 // HubMap.StartInitialTimer
+      // HubMap.handleShowTimer (the reveal), first lines:
+      PinPointersManager.getInstance().smHold = false;
+      PinPointersManager.getInstance().smFadeIn = true;
+      PinPointersManager.getInstance().updatePointersPosition();
+    ops:
+      - add_field: { class: PinPointersManager, name: smHold, type: Boolean, visibility: public }
+      - edit:
+          method: PinPointersManager.updatePointersPosition
+          steps:
+            - insert: { at: method-start }
+              code: |
+                getlocal0
+                getproperty     PinPointersManager.smHold
+                iffalse         go
+                returnvoid
+                go:
+      - add_field: { class: PinPointersManager, name: smFadeIn, type: Boolean, visibility: public }
+      - edit:
+          method: PinPointersManager.updatePointersPosition
+          steps:
+            - insert: { at: method-start }
+              code:
+                - |
+                  getlocal0
+                  getproperty     PinPointersManager.smFadeIn
+                  iffalse         no_fade
+                  getlocal0
+                  pushfalse
+                  setproperty     PinPointersManager.smFadeIn
+                  getlocal0
+                  getproperty     PinPointersManager._canvas
+                  pushbyte        0
+                  setproperty     alpha
+                - snippet: fade_in
+                  args: { member: PinPointersManager._canvas, duration: "{{fade}}" }
+                - |
+                  no_fade:
+      - edit:
+          method: HubMap.StartInitialTimer
+          steps:
+            - insert: { at: method-start }
+              code: |
+                getlex          PinPointersManager
+                callproperty    getInstance, 0
+                pushtrue
+                setproperty     PinPointersManager.smHold
+      - edit:
+          method: HubMap.handleShowTimer
+          steps:
+            - insert: { at: method-start }
+              code: |
+                getlex          PinPointersManager
+                callproperty    getInstance, 0
+                pushfalse
+                setproperty     PinPointersManager.smHold
+                getlex          PinPointersManager
+                callproperty    getInstance, 0
+                pushtrue
+                setproperty     PinPointersManager.smFadeIn
+                getlex          PinPointersManager
+                callproperty    getInstance, 0
+                callpropvoid    PinPointersManager.updatePointersPosition, 0
+
+  # ---------------------------------------------------------------------------------------------
+  - id: input-during-fade
+    title: The map accepts input from the start of the fade
+    why: |
+      _fadingInCompleted has one reader, CanProcessInput(), which also refuses input while pins
+      build or the reveal timer runs; those stay. handleFadingInEnded still sets it and enables the
+      side panels at fade end.
+    as3: |
+      _fadingInCompleted = true;      // handleShowTimer; was false
+    ops:
+      - edit:
+          method: HubMap.handleShowTimer
+          steps:
+            - replace:
+                after: |
+                  getlocal0
+                  callpropvoid    StopShowTimer
+                  getlocal0
+                match: |
+                  pushfalse
+                before: |
+                  initproperty|setproperty  _fadingInCompleted
+              with: pushtrue
+
+  # ---------------------------------------------------------------------------------------------
+  - id: keep-pin-fade-on-snap
+    title: Snapping to a pin during the fade doesn't leave the pins translucent
+    why: |
+      Fixes bug where if a pin is hovered while fading in, all pins become translucent.
+      CenterOnPin cancelled *all* tweens on the pin layer before gliding it, including the fade-in.
+      Now only the previous snap glide is cancelled, exactly as removeTweens did to it (paused so
+      its onComplete never fires, then unregistered). GTweener already strips conflicting x/y.
+    as3: |
+      // was: GTweener.removeTweens(mcHubMapPinContainer);
+      if (_snapTween2) { _snapTween2.paused = true; GTweener.remove(_snapTween2); }
+    ops:
+      - edit:
+          method: HubMap.CenterOnPin
+          steps:
+            - replace:
+                match: |
+                  getlex        $gt:GTweener
+                  getlocal0
+                  getproperty   mcHubMapPinContainer
+                  callpropvoid  removeTweens
+              with: |
+                getlocal0
+                getproperty     HubMap._snapTween2
+                iffalse         no_previous_snap
+                getlocal0
+                getproperty     HubMap._snapTween2
+                pushtrue
+                setproperty     paused
+                getlex          $gt
+                getlocal0
+                getproperty     HubMap._snapTween2
+                callpropvoid    remove, 1
+                no_previous_snap:
+
+  # ---------------------------------------------------------------------------------------------
+  - id: crosshair-fade
+    title: The gamepad crosshair fades in with the map
+    why: |
+      Fixes the gamepad crosshair briefly being shown even if using KB&M.
+      The crosshair is shown unless the input device is a mouse, but every menu starts out assuming
+      a gamepad and only learns "mouse" ~47 ms in, so mouse users saw it flash. It now stays
+      transparent until the reveal; vanilla's show/hide logic is untouched. Loading cancels any fade
+      still running from a quick region switch.
+    as3: |
+      mcHubMapCrosshair.alpha = 0;                                     // configUI
+      GTweener.removeTweens(mcHubMapCrosshair); mcHubMapCrosshair.alpha = 0;   // StartInitialTimer
+      GTweener.to(mcHubMapCrosshair, 0.2, {alpha: 1}, {ease: Sine.easeIn});    // handleShowTimer
+    ops:
+      - edit:
+          method: HubMap.configUI
+          steps:
+            - insert:
+                after: |
+                  getlocal0
+                  getproperty   mcHubMapPinContainer
+                  pushbyte      0
+                  setproperty   alpha
+              code: |
+                getlocal0
+                getproperty     mcHubMapCrosshair
+                pushbyte        0
+                setproperty     alpha
+      - edit:
+          method: HubMap.StartInitialTimer
+          steps:
+            - insert: { at: method-start }
+              code: |
+                getlex          com.gskinner.motion::GTweener
+                getlocal0
+                getproperty     mcHubMapCrosshair
+                callpropvoid    removeTweens, 1
+                getlocal0
+                getproperty     mcHubMapCrosshair
+                pushbyte        0
+                setproperty     alpha
+      - edit:
+          method: HubMap.handleShowTimer
+          steps:
+            - insert:
+                after: |
+                  getlocal0
+                  callpropvoid  StopShowTimer
+              code:
+                - snippet: fade_in
+                  args: { member: mcHubMapCrosshair, duration: "{{fade}}" }
+
+  # ---------------------------------------------------------------------------------------------
+  - id: side-panels-with-map
+    title: The legend and quest tracker fade in with the map
+    why: |
+      Eliminates "pop in" of legend and quest tracker after map fades in.
+      They're filled from map data, so they belong to the map layer. The reveal makes the same calls
+      vanilla makes at fade end (which then change nothing); the enable functions keep vanilla's
+      logic and only add a fade when a panel has just become visible.
+    as3: |
+      // HubMap.handleShowTimer, at the reveal:
+      if (funcEnableCategoryPanel != null) funcEnableCategoryPanel(true);
+      if (funcEnableQuestTracker != null) funcEnableQuestTracker(true);
+      // MapMenu.enableCategoryPanel / enableQuestTracker:
+      var wasVisible:Boolean = <panel>.visible;                // first line
+      if (on && !wasVisible && <panel>.visible) { <panel>.alpha = 0; GTweener.to(<panel>, 0.2, ...); }   // before every return
+    ops:
+      - edit:
+          method: HubMap.handleShowTimer
+          steps:
+            - insert:
+                after: |
+                  getlocal0
+                  callpropvoid  StopShowTimer
+              code: |
+                getlocal0
+                getproperty     funcEnableCategoryPanel
+                pushnull
+                ifeq            no_panel
+                getlocal0
+                pushtrue
+                callpropvoid    funcEnableCategoryPanel, 1
+                no_panel:
+                getlocal0
+                getproperty     funcEnableQuestTracker
+                pushnull
+                ifeq            no_tracker
+                getlocal0
+                pushtrue
+                callpropvoid    funcEnableQuestTracker, 1
+                no_tracker:
+      - edit:
+          methods:
+            MapMenu.enableCategoryPanel: { panel: mcHubMapPinPanel }
+            MapMenu.enableQuestTracker:  { panel: mcHubMapQuestTracker }
+          locals: [wasVisible]
+          steps:
+            - insert: { at: method-start }
+              code: |
+                getlocal0
+                getproperty     {{panel}}
+                getproperty     visible
+                setlocal        wasVisible
+            - insert: { at: before-each-return }
+              code:
+                - |
+                  getlocal1
+                  iffalse         done
+                  getlocal        wasVisible
+                  iftrue          done
+                  getlocal0
+                  getproperty     {{panel}}
+                  getproperty     visible
+                  iffalse         done
+                  getlocal0
+                  getproperty     {{panel}}
+                  pushbyte        0
+                  setproperty     alpha
+                - snippet: fade_in
+                  args: { member: "{{panel}}", duration: "{{fade}}" }
+                - |
+                  done:
+
+
+  # ---------------------------------------------------------------------------------------------
+  - id: refresh-view-after-slide
+    title: When the slide-in ends, the visible area is recomputed for the view at rest
+    when: slide
+    why: |
+      The visible area (the screen in map coordinates) decides which sharp tiles load and which pins
+      count as on screen. It's computed when pins finish loading, which is now during the slide, and
+      vanilla doesn't recompute it when the slide ends. Recomputing it here fits it to the view at
+      rest: otherwise a quest pin that was on screen mid-slide would still count as on screen, and its
+      edge arrow would stay hidden until the player moved. Only on the regional map (IsEnabled): the
+      slide also ends when the menu opens on the world map.
+    as3: |
+      // HubMap.SetMenuAnimCompleted(), after vanilla's lines:
+      if (IsEnabled()) {
+          UpdateVisibilityAndPinPositions(false);                            // visible area, menu at rest
+          mcHubMapZoomContainer.mcHubMapContainer.ShowTilesFromCurrentLod(); // load tiles for it
+      }
+    ops:
+      - edit:
+          method: HubMap.SetMenuAnimCompleted
+          steps:
+            - insert: { at: before-each-return }
+              code: |
+                getlocal0
+                callproperty    IsEnabled, 0
+                iffalse         not_enabled
+                getlocal0
+                pushfalse
+                callpropvoid    HubMap.UpdateVisibilityAndPinPositions, 1
+                getlocal0
+                getproperty     mcHubMapZoomContainer
+                getproperty     mcHubMapContainer
+                callpropvoid    ShowTilesFromCurrentLod, 0
+                not_enabled:
+
+  # ---------------------------------------------------------------------------------------------
+  - id: tiles-for-final-view
+    title: During the slide-in, the map loads sharp tiles for the view it will end up showing
+    when: slide
+    why: |
+      Fixes issue where part of the map was blurry after slide in.
+      Sharp tiles are requested for the visible area when pins finish loading, which is during the
+      slide, while the menu is still shifted down: the bottom of the final view stayed blurry until
+      its tiles loaded after the slide. The area's bottom edge is now computed as if the menu were at
+      rest, so it covers both the mid-slide view and the final one, and their tiles load together.
+      The offset is the menu's y (smSlideOffset; 0 after the slide, or if the menu isn't found).
+    as3: |
+      // HubMapContainer, new method:
+      public function smSlideOffset() : Number {
+          for (var menu:DisplayObjectContainer = parent; menu; menu = menu.parent)
+              if (menu is MapMenu) return menu.y;     // 0 once the slide is done
+          return 0;
+      }
+      // HubMapContainer.UpdateVisibileArea()
+      _visibleAreaLocalLeftBottom = globalToLocal(_visibleAreaGlobalLeftBottom.add(new Point(0, smSlideOffset())));
+      _visibleAreaLocalRightTop = globalToLocal(_visibleAreaGlobalRightTop);   // vanilla
+    ops:
+      - add_method:
+          class: HubMapContainer
+          name: smSlideOffset
+          returns: Number
+          locals: [menu]
+          code: |
+            getlocal0
+            pushscope
+            getlocal0
+            getproperty     parent
+            setlocal        menu
+            jump            test
+            next:
+            label
+            getlocal        menu
+            getproperty     parent
+            setlocal        menu
+            test:
+            getlocal        menu
+            iffalse         not_found
+            getlocal        menu
+            getlex          MapMenu
+            istypelate
+            iffalse         next
+            getlocal        menu
+            getproperty     y
+            convert_d
+            returnvalue
+            not_found:
+            push            0
+            convert_d
+            returnvalue
+      - edit:
+          method: HubMapContainer.UpdateVisibileArea
+          steps:
+            - insert:
+                after: |
+                  getproperty     _visibleAreaGlobalLeftBottom
+              code: |
+                findpropstrict  flash.geom::Point
+                push            0
+                getlocal0
+                callproperty    HubMapContainer.smSlideOffset, 0
+                constructprop   flash.geom::Point, 2
+                callproperty    add, 1
