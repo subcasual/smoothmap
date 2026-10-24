@@ -18,8 +18,8 @@ No gameplay changes. Safe to install and uninstall during a playthrough.
 This repository holds the mod's source and the patching framework it's built with:
 
 * [**The mod**](#the-mod): what Smooth Map changes, and how to build it.
-* [**The patching framework**](#the-patching-framework): tools for patching the ActionScript in
-  Flash UI files, for this file or any other, in The Witcher 3 or another game.
+* [**The patching framework**](#the-patching-framework): write patches by editing ActionScript, for
+  this file or any other Flash UI file, in The Witcher 3 or another game.
 
 ## The mod
 
@@ -58,9 +58,30 @@ its author before publishing one.
 
 ## The patching framework
 
-The engine behind Smooth Map isn't specific to the map, or to The Witcher 3. It patches the
-ActionScript bytecode of Flash and Scaleform (GFX) files directly, with no decompiling and
-recompiling, and CDPR's `.redswf` files, which hold The Witcher 3's UI.
+The engine behind Smooth Map isn't specific to the map, or to The Witcher 3. It changes the
+ActionScript in Flash and Scaleform (GFX) UI files, including CDPR's `.redswf` files, which hold The
+Witcher 3's UI.
+
+### Writing a patch: edit the ActionScript
+
+Export the classes you want to change as ActionScript, edit them like any source code, and let the
+[patch generator](patch_generator/README.md) turn your edits into a patch set:
+
+    python tools/generate_patch.py export vanilla HubMap      # -> build/edit/.../HubMap.as, to edit
+    python tools/generate_patch.py build -o patches/my-change.yaml
+
+The patch changes only what you changed, and it's verified before it's written: applied to the file,
+it gives exactly the code you wrote. You never touch bytecode. It needs
+[FFDec](https://github.com/jindrapetrik/jpexs-decompiler) and Java to write patches, but not to apply
+them. Its README lists the few kinds of changes it can't make yet.
+
+### Writing a patch by hand
+
+For those, or to fine-tune a generated patch, you can write patches directly in the format's
+readable bytecode assembly. [`docs/writing-patches.md`](docs/writing-patches.md) walks through it,
+and [`swf_patch/patch-format.md`](swf_patch/patch-format.md) is the full reference.
+
+### Why patches are safe
 
 * **Patches are anchored on code**, not on byte offsets: each one finds the instructions it
   changes by pattern, and checks every value it replaces. So a patch set written for the game's file
@@ -70,16 +91,7 @@ recompiling, and CDPR's `.redswf` files, which hold The Witcher 3's UI.
 * **Patch sets stack**: several can be applied to one file, in order.
 * **Every edited method is verified** (stack and scope) before the file is written.
 
-### Writing patches
-
-* [`docs/writing-patches.md`](docs/writing-patches.md) walks through it: finding the code, writing
-  a patch, checking and applying it.
-* [`swf_patch/patch-format.md`](swf_patch/patch-format.md) is the format's full reference.
-* Or write the change in ActionScript: [`patch_generator`](patch_generator/README.md) turns edits
-  of decompiled classes into a patch set, verified (needs [FFDec](https://github.com/jindrapetrik/jpexs-decompiler)
-  and Java).
-
-### Using it
+### Applying patches
 
     python -m redswf_patch apply -p my-patches.yaml IN.redswf OUT.redswf
     python -m redswf_patch check -p my-patches.yaml FILE.redswf     # which patches apply to a file

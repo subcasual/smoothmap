@@ -2,9 +2,11 @@
 
 This walks through writing a patch set for a REDengine Flash file, from finding the code to
 building a mod. The example makes map panning faster; the same steps work for any `.redswf` the
-game uses. The full reference is [`patch-format.md`](../swf_patch/patch-format.md). For a plain SWF
-or GFX file (another game's UI, say), use `python -m swf_patch` where this says `python -m
-redswf_patch`; everything else is the same.
+game uses. There are two ways: edit the ActionScript and let the patch generator write the patch,
+or write it by hand, for what the generator can't do yet or to fine-tune its output. The full
+reference is [`patch-format.md`](../swf_patch/patch-format.md). For a plain SWF or GFX
+file (another game's UI, say), use `python -m swf_patch` where this says `python -m redswf_patch`;
+everything else is the same.
 
 You need Python (3.13 recommended) with PyYAML, and the file you want to change:
 
@@ -14,13 +16,36 @@ You need Python (3.13 recommended) with PyYAML, and the file you want to change:
 * **Another mod's version**: `python tools/extract.py <mod folder> -o build/other.redswf` pulls it
   out of the mod's bundles. Use `--resource <depot path>` for a file other than the map.
 
+## The easy way: edit the ActionScript
+
+Export the classes you want to change as decompiled ActionScript, edit them, and let
+[`patch_generator`](../patch_generator/README.md) write the patch set. It needs
+[FFDec](https://github.com/jindrapetrik/jpexs-decompiler) and Java:
+
+    python tools/generate_patch.py export vanilla HubMap
+    (edit build/edit/red/game/witcher3/menus/worldmap/HubMap.as)
+    python tools/generate_patch.py build -o faster-panning.yaml
+
+The generated patch changes only what you changed, anchored on the original instructions around
+each change, and is verified before it's written. Fill in its `why`, then check, apply and test it
+(steps 3 and 4 below). Changing `KEYBOARD_SCROLL_SPEED` to 25 in the source gives exactly the
+`set_initial_values` of the hand-written example below. A few kinds of changes (removing an `if`
+block, say) still replace the whole method, which keeps them from combining with other patch sets
+that change the same method; the generator's README lists those and what else it can't do yet.
+
+## By hand
+
+The rest of this walks through writing the patch yourself, in the format's bytecode assembly:
+for what the generator can't do yet, or to fine-tune what it wrote. Steps 3 and 4 apply to
+generated patches too.
+
 ## 1. Understand the code
 
 Read the ActionScript first. [JPEXS FFDec](https://github.com/jindrapetrik/jpexs-decompiler)
 decompiles Flash files, but a `.redswf` is a REDengine container around one:
 `python tools/extract.py <file or mod> --swf` writes the Flash file inside, for FFDec to open. Don't
 save edits from FFDec: its recompiler is known to break this file. (To write a change as
-ActionScript, use the patch generator below, which turns your edits into a verified patch instead.)
+ActionScript, use the patch generator above, which turns your edits into a verified patch instead.)
 
 Then look at the bytecode you'll anchor on. `tools/disasm.py` prints it in the patch format's own
 syntax, so you can copy patterns straight from it:
@@ -121,22 +146,6 @@ Either put the patched depot file in a REDkit project at the same path and use S
 or let `tools/build_mod.py` do the whole chain (patch, cook, pack, metadata store, mod folder, zip):
 copy `build.yaml`, change `targets` to your patch set and mod folder, and run
 `python tools/build_mod.py --config my_build.yaml`. It needs REDkit's `wcc_lite`.
-
-## Or: write the change in ActionScript
-
-Instead of steps 1 and 2, you can edit the decompiled ActionScript and let
-[`patch_generator`](../patch_generator/README.md) write the patch set (needs FFDec and Java):
-
-    python tools/generate_patch.py export vanilla HubMap
-    (edit build/edit/red/game/witcher3/menus/worldmap/HubMap.as)
-    python tools/generate_patch.py build -o faster-panning.yaml
-
-The generated patch changes only what you changed, anchored on the original instructions around
-each change, and is verified before it's written; fill in its `why` and continue with step 3.
-Changing `KEYBOARD_SCROLL_SPEED` to 25 in the source gives exactly the `set_initial_values` above.
-A few kinds of change (removing an `if` block, say) still replace the whole method, which keeps
-them from combining with other patch sets that change the same method; the generator's README
-lists those and what else it can't do yet.
 
 ## Combining patch sets
 

@@ -100,6 +100,9 @@ applies only where that method is exactly as exported, and stops with a message 
   parts of the same methods. A method replaced whole needs that method exactly as exported, so for
   those, export from the file the patch will apply to.
 
+For a change the generator can't make, write that part by hand, as a patch set of its own or added
+to the generated one: [`docs/writing-patches.md`](../docs/writing-patches.md#by-hand) walks through it.
+
 ## Modules
 
 | Module | What it does |
