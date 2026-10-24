@@ -62,6 +62,22 @@ The engine behind Smooth Map isn't specific to the map, or to The Witcher 3. It 
 ActionScript in Flash and Scaleform (GFX) UI files, including CDPR's `.redswf` files, which hold The
 Witcher 3's UI.
 
+Patches are declarative and intended to be self documenting.  Example:
+
+```yaml
+- id: faster-keyboard-panning
+  title: Keyboard panning is faster
+  why: |
+    Vanilla pans the regional map by 15 units per update with WASD.
+  as3: |
+    KEYBOARD_SCROLL_SPEED = 25;   // HubMap; was 15
+  ops:
+    - set_initial_values:         # refuses unless the constant is still 15
+        class: HubMap
+        values:
+          KEYBOARD_SCROLL_SPEED: { expect: 15, value: 25 }
+```
+
 ### Writing a patch: edit the ActionScript
 
 Export the classes you want to change as ActionScript, edit them like any source code, and let the
